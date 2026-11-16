@@ -53,6 +53,7 @@ svg.chart{width:100%;height:auto;display:block}
 .s6{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 6px;text-align:center}
 .s6 .v{font-size:18px;font-weight:650;white-space:nowrap}
 .s6 .l{font-size:12px;color:var(--mute)}
+.s6 .rg{font-size:12px;font-weight:600;color:var(--ink);opacity:.75;white-space:nowrap}
 details.day summary{list-style:none;cursor:pointer}
 details.day summary .row{flex-wrap:nowrap;gap:6px}
 details.day summary h2{flex:1;min-width:0;font-size:16px}
@@ -306,7 +307,8 @@ function confiance(s){
   const daccord = (a,b) => {
     const dT = Math.max(Math.abs(a.tmax-b.tmax), Math.abs(a.tmin-b.tmin));
     const dR = Math.abs(a.pluie-b.pluie), rel = dR/Math.max(1,(a.pluie+b.pluie)/2);
-    return dT<=1.5 && (dR<=1.5 || rel<=0.3);
+    const sec = a.pluie < 1 && b.pluie < 1;            // deux modèles quasi secs = d'accord
+    return dT<=2 && (sec || dR<=2 || rel<=0.4);
   };
   let paires = 0, ok = 0;
   for(let x=0;x<ms.length;x++) for(let y=x+1;y<ms.length;y++){ paires++; if(daccord(ms[x],ms[y])) ok++; }
@@ -314,6 +316,14 @@ function confiance(s){
   if(ok===paires) return {cls:"b-good", txt:"Confiance haute · "+n+"/"+n};
   if(ok>0)        return {cls:"b-mid",  txt:"Confiance moyenne · 2/"+n};
   return {cls:"b-bad", txt:"Confiance faible · 0/"+n};
+}
+function fourchette(d, k, fmt){              // "(a à b)" entre modèles quand la confiance n'est pas haute
+  if(d.conf.cls==="b-good" || d.conf.cls==="b-one") return "";
+  const v = MODELS.map(m=>d.models[m.id]).filter(Boolean).map(x=>x[k]);
+  if(v.length<2) return "";
+  const lo = Math.min(...v), hi = Math.max(...v);
+  const l = fmt(lo).replace(/ mm$/,"").replace(/°$/,"");
+  return `<div class="rg">${l} à ${fmt(hi)}</div>`;
 }
 /* fenêtre jour (sortie) et nuit (fin de sortie → début de sortie du lendemain) */
 function windows(date){
@@ -431,9 +441,9 @@ function renderPrev(){
       <summary><div class="row"><h2>${dayLabel(d.date)}</h2><span class="sp"></span><span class="badge ${d.conf.cls}">${d.conf.txt}</span><span class="chev">▾</span></div>
         <div class="resume mute">${fmtT(d.tmin)} / ${fmtT(d.tmax)} · ${fmtP(d.pluie)} · ressenti jour ${fmtT(w.jour.indice)}, nuit ${fmtT(w.nuit.indice)}</div></summary>
       <div class="stats6">
-        <div class="s6"><div class="v t-min">${fmtT(d.tmin)}</div><div class="l">T° mini</div></div>
-        <div class="s6"><div class="v t-max">${fmtT(d.tmax)}</div><div class="l">T° maxi</div></div>
-        <div class="s6"><div class="v" style="color:var(--rain)">${fmtP(d.pluie)}</div><div class="l">pluie (${d.heuresPluie} h)</div></div>
+        <div class="s6"><div class="v t-min">${fmtT(d.tmin)}</div>${fourchette(d,"tmin",fmtT)}<div class="l">T° mini</div></div>
+        <div class="s6"><div class="v t-max">${fmtT(d.tmax)}</div>${fourchette(d,"tmax",fmtT)}<div class="l">T° maxi</div></div>
+        <div class="s6"><div class="v" style="color:var(--rain)">${fmtP(d.pluie)}</div>${fourchette(d,"pluie",fmtP)}<div class="l">pluie (${d.heuresPluie} h)</div></div>
         <div class="s6"><div class="v" style="color:var(--mute)">${nuages==null?"–":Math.round(nuages)+" %"}</div><div class="l">nuages</div></div>
         <div class="s6"><div class="v" style="color:var(--wind)">${kmh(w.jour.ventMax)}</div><div class="l">vent (sortie)</div></div>
         <div class="s6"><div class="v" style="color:${fort?"var(--bad)":"var(--wind)"}">${kmh(w.jour.rafMax)}</div><div class="l">rafales (sortie)</div></div>
@@ -635,7 +645,7 @@ function renderReglages(){
     <div class="mute" style="margin-top:8px">Au pré, la pluie (≥ seuil) ou des rafales fortes imposent au minimum la 0 g imperméable.</div>
     <button class="link" id="resetSeuils">Revenir aux seuils par défaut</button>
   </div>
-  <div class="card mute" style="font-size:13px">Sources : Open-Meteo, 3 modèles indépendants : Météo-France (AROME 1,5 km sur 2 jours, puis ARPEGE), ECMWF (centre européen) et ICON (service météo allemand). Les valeurs affichées sont la médiane des trois : un modèle isolé est écarté. Confiance : haute si les 3 sont d'accord (écart ≤ 1,5° et ≤ 1,5 mm ou 30 %), moyenne si 2 sur 3, faible sinon.</div>`;
+  <div class="card mute" style="font-size:13px">Sources : Open-Meteo, 3 modèles indépendants : Météo-France (AROME 1,5 km sur 2 jours, puis ARPEGE), ECMWF (centre européen) et ICON (service météo allemand). Les valeurs affichées sont la médiane des trois : un modèle isolé est écarté. Deux modèles sont « d'accord » si leurs températures mini et maxi diffèrent de 2° au plus, et si leur pluie est sous 1 mm pour les deux, ou diffère de 2 mm ou 40 % au plus. Confiance haute : les 3 d'accord ; moyenne : au moins une paire d'accord ; faible : aucune. Sauf en confiance haute, la fourchette entre modèles s'affiche sous la valeur.</div>`;
   const $ = id => document.getElementById(id);
   const save = () => { store.set("settings", settings); wx && renderAll(); };
   $("s1").onchange = e => { settings.sortieDebut = +e.target.value; save(); };
