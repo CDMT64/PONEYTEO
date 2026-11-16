@@ -138,7 +138,8 @@ let editing = null;     // cheval en cours d'édition
 /* ================= Modèles météo ================= */
 const MODELS = [
   {id:"meteofrance_seamless", label:"Météo-France (AROME/ARPEGE)", short:"MF"},
-  {id:"ecmwf_ifs025",         label:"ECMWF (européen)",          short:"ECMWF"}
+  {id:"ecmwf_ifs025",         label:"ECMWF (européen)",          short:"ECMWF"},
+  {id:"icon_seamless",        label:"DWD ICON (allemand)",       short:"ICON"}
 ];
 
 /* ================= Indice « ressenti cheval » =================
@@ -254,7 +255,8 @@ function process(j){
   const H = j.hourly, times = H.time;
   const pick = (v, m) => H[v+"_"+m] || (MODELS.length===1 ? H[v] : null);
   const VARS = {t:"temperature_2m", p:"precipitation", cc:"cloud_cover", ws:"wind_speed_10m", wg:"wind_gusts_10m", sw:"shortwave_radiation"};
-  const avg = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
+  // valeur médiane des modèles : avec 3 modèles, celui qui s'écarte seul est ignoré
+  const avg = a => { if(!a.length) return null; const b=[...a].sort((x,y)=>x-y), m=b.length>>1; return b.length%2 ? b[m] : (b[m-1]+b[m])/2; };
   const hours = times.map((t,i) => {
     const per = {};
     MODELS.forEach(m => {
@@ -301,12 +303,17 @@ function summarize(date, hrs){
 function confiance(s){
   const ms = MODELS.map(m=>s.models[m.id]).filter(Boolean);
   if(ms.length < 2) return {cls:"b-one", txt:"1 seul modèle"};
-  const [a,b] = ms;
-  const dT = Math.max(Math.abs(a.tmax-b.tmax), Math.abs(a.tmin-b.tmin));
-  const dR = Math.abs(a.pluie-b.pluie), moyR = (a.pluie+b.pluie)/2, rel = dR/Math.max(1,moyR);
-  if(dT<=1.5 && (dR<=1.5 || rel<=0.3)) return {cls:"b-good", txt:"Confiance haute", dT, dR};
-  if(dT<=3 && (dR<=4 || rel<=0.6))     return {cls:"b-mid",  txt:"Confiance moyenne", dT, dR};
-  return {cls:"b-bad", txt:"Confiance faible", dT, dR};
+  const daccord = (a,b) => {
+    const dT = Math.max(Math.abs(a.tmax-b.tmax), Math.abs(a.tmin-b.tmin));
+    const dR = Math.abs(a.pluie-b.pluie), rel = dR/Math.max(1,(a.pluie+b.pluie)/2);
+    return dT<=1.5 && (dR<=1.5 || rel<=0.3);
+  };
+  let paires = 0, ok = 0;
+  for(let x=0;x<ms.length;x++) for(let y=x+1;y<ms.length;y++){ paires++; if(daccord(ms[x],ms[y])) ok++; }
+  const n = ms.length;
+  if(ok===paires) return {cls:"b-good", txt:"Confiance haute · "+n+"/"+n};
+  if(ok>0)        return {cls:"b-mid",  txt:"Confiance moyenne · 2/"+n};
+  return {cls:"b-bad", txt:"Confiance faible · 0/"+n};
 }
 /* fenêtre jour (sortie) et nuit (fin de sortie → début de sortie du lendemain) */
 function windows(date){
@@ -347,8 +354,8 @@ function demoData(){
     const base = 6 + 3*Math.sin(day/2) - 2.5*Math.cos((hr-15)/24*2*Math.PI) * -1;
     const rainy = (Math.sin(day*2.3)+Math.sin(day*0.9+2)) > 0.7 || (day>8.25&&day<8.7) || (day>9.85&&day<10.15);
     MODELS.forEach((m,k) => {
-      h["temperature_2m_"+m.id].push(+(base + (k? (day>8?1.8:0.5):0) + (rnd()-.5)).toFixed(1));
-      const p = rainy ? Math.max(0, (rnd()*1.6 - 0.3) * (k? 1+(day>8?0.8:0.15):1)) : 0;
+      h["temperature_2m_"+m.id].push(+(base + (k===1? (day>8?1.8:0.5) : k===2 ? 0.3 : 0) + (rnd()-.5)).toFixed(1));
+      const p = rainy ? Math.max(0, (rnd()*1.6 - 0.3) * (k===1? 1+(day>8?0.8:0.15) : k===2 ? 1.1 : 1)) : 0;
       h["precipitation_"+m.id].push(+p.toFixed(1));
       const cc = rainy ? 95 : Math.max(0, Math.min(100, 50 + 45*Math.sin(day*1.3+k*.3)));
       h["cloud_cover_"+m.id].push(Math.round(cc));
@@ -445,7 +452,7 @@ function renderPrev(){
   });
   const majTxt = demo ? "Données d'exemple" : "Mis à jour le "+new Date(wx.fetched).toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+" à "+new Date(wx.fetched).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
   html += `<button class="btn refresh" id="refresh">⟳ Actualiser la météo</button>
-    <div class="mute" style="text-align:center;margin:6px 0 20px">${majTxt}${demo?"":" · Open-Meteo (Météo-France + ECMWF)"}<br>Mise à jour automatique à l'ouverture et toutes les 30 min.</div>`;
+    <div class="mute" style="text-align:center;margin:6px 0 20px">${majTxt}${demo?"":" · Open-Meteo (Météo-France, ECMWF, ICON)"}<br>Mise à jour automatique à l'ouverture et toutes les 30 min.</div>`;
   el.innerHTML = html;
   el.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => {
     const t = document.getElementById("detail-"+b.dataset.detail); t.classList.toggle("hidden");
@@ -486,7 +493,7 @@ function detailTable(d){
     const r = v => v==null ? "–" : Math.round(v);
     t += `<tr class="${out?"out":""}"><td>${String(o.h).padStart(2,"0")}h</td><td>${fmtT(o.t)}</td><td><b>${indiceHeure(o)?fmtT(indiceHeure(o).i):"–"}</b></td><td>${(o.p||0)>0?String(Math.round(o.p*10)/10).replace(".",","):"–"}</td><td>${r(o.ws)}</td><td>${r(o.wg)}</td><td>${o.cc==null?"–":Math.round(o.cc)+"%"}</td></tr>`;
   });
-  return t + `</table><div class="mute" style="font-size:12px;margin-top:4px">Ress. = ressenti cheval (°C). Pluie en mm, vent et rafales en km/h. Moyenne Météo-France + ECMWF. Lignes vertes = heures de sortie.</div>`;
+  return t + `</table><div class="mute" style="font-size:12px;margin-top:4px">Ress. = ressenti cheval (°C). Pluie en mm, vent et rafales en km/h. Valeur médiane des 3 modèles. Lignes vertes = heures de sortie.</div>`;
 }
 
 function renderBilan(){
@@ -628,7 +635,7 @@ function renderReglages(){
     <div class="mute" style="margin-top:8px">Au pré, la pluie (≥ seuil) ou des rafales fortes imposent au minimum la 0 g imperméable.</div>
     <button class="link" id="resetSeuils">Revenir aux seuils par défaut</button>
   </div>
-  <div class="card mute" style="font-size:13px">Sources : Open-Meteo, modèles Météo-France (AROME 1,5 km à 2 jours puis ARPEGE) et ECMWF (modèle européen). Indice de confiance = accord entre les deux modèles.</div>`;
+  <div class="card mute" style="font-size:13px">Sources : Open-Meteo, 3 modèles indépendants : Météo-France (AROME 1,5 km sur 2 jours, puis ARPEGE), ECMWF (centre européen) et ICON (service météo allemand). Les valeurs affichées sont la médiane des trois : un modèle isolé est écarté. Confiance : haute si les 3 sont d'accord (écart ≤ 1,5° et ≤ 1,5 mm ou 30 %), moyenne si 2 sur 3, faible sinon.</div>`;
   const $ = id => document.getElementById(id);
   const save = () => { store.set("settings", settings); wx && renderAll(); };
   $("s1").onchange = e => { settings.sortieDebut = +e.target.value; save(); };
@@ -686,13 +693,13 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => switchTab
 async function load(force){
   if(!settings.lieu){ renderAll(); return; }
   const cache = store.get("cache", null);
-  const sameLieu = cache && cache.v===2 && cache.lat===settings.lieu.lat && cache.lon===settings.lieu.lon;
+  const sameLieu = cache && cache.v===3 && cache.lat===settings.lieu.lat && cache.lon===settings.lieu.lon;
   if(sameLieu && !wx){ wx = process(cache.raw); wx.fetched = cache.at; }
   renderAll();
   if(!force && sameLieu && Date.now()-cache.at < 30*60e3) return;   // cache 30 min
   try{
     const raw = await fetchWeather();
-    store.set("cache", {v:2, lat:settings.lieu.lat, lon:settings.lieu.lon, at:Date.now(), raw});
+    store.set("cache", {v:3, lat:settings.lieu.lat, lon:settings.lieu.lon, at:Date.now(), raw});
     wx = process(raw); demo=false; renderAll();
   }catch(e){
     const el = document.getElementById("tab-prev");
