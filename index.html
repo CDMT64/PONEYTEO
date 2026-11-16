@@ -12,11 +12,11 @@
 :root{
   --bg:#f4f1ea; --card:#fff; --ink:#22261f; --mute:#6b6f66; --line:#e3ded2;
   --green:#2f5d3a; --green-l:#e4efe3; --rain:#2f73c9; --rain-l:#dbe8f8;
-  --temp:#d0632a; --warn:#b7791f; --bad:#b33a3a; --good:#2f7d46;
+  --temp:#d0632a; --wind:#5b6b7a; --warn:#b7791f; --bad:#b33a3a; --good:#2f7d46;
 }
 @media (prefers-color-scheme: dark){
   :root{--bg:#171a16;--card:#22261f;--ink:#ecebe5;--mute:#a3a69c;--line:#353a31;
-  --green:#7fb98a;--green-l:#26352a;--rain:#6ea6ec;--rain-l:#1e2c3d;--temp:#f08a52}
+  --green:#7fb98a;--green-l:#26352a;--rain:#6ea6ec;--rain-l:#1e2c3d;--temp:#f08a52;--wind:#9fb0c0}
 }
 *{box-sizing:border-box}
 body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.4}
@@ -48,7 +48,21 @@ svg.chart{width:100%;height:auto;display:block}
 .hrec{display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--line);border-radius:10px}
 .hrec svg{width:44px;height:44px;flex:none}
 .hrec .nm{font-weight:600}
-.pill{display:inline-block;padding:2px 8px;border-radius:8px;background:var(--green-l);font-size:13px;margin:2px 4px 2px 0}
+.pill{display:block;width:fit-content;max-width:100%;padding:3px 9px;border-radius:8px;background:var(--green-l);font-size:13px;margin:4px 0}
+.stats6{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
+.s6{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 6px;text-align:center}
+.s6 .v{font-size:18px;font-weight:650;white-space:nowrap}
+.s6 .l{font-size:12px;color:var(--mute)}
+details.day summary{list-style:none;cursor:pointer}
+details.day summary .row{flex-wrap:nowrap;gap:6px}
+details.day summary h2{flex:1;min-width:0;font-size:16px}
+details.day summary .sp{display:none}
+.badge{white-space:nowrap}
+details.day summary::-webkit-details-marker{display:none}
+details.day .chev{font-size:18px;color:var(--mute);transition:transform .2s;margin-left:6px}
+details.day[open] .chev{transform:rotate(180deg)}
+details.day .resume{margin-top:4px}
+details.day[open] .resume{display:none}
 .pill.n{background:var(--rain-l)}
 button.btn{background:var(--green);color:#fff;border:0;border-radius:10px;padding:10px 14px;font-size:15px;cursor:pointer}
 button.btn.sec{background:var(--card);color:var(--ink);border:1px solid var(--line)}
@@ -130,22 +144,28 @@ const MODELS = [
    - soleil : +1 °C par 100 W/m² de rayonnement solaire (max +4 °C) ; nul la nuit
    - vent   : −1 °C par 5 km/h au-delà de 10 km/h (max −8 °C)
    - pluie  : −3 °C pour une heure de pluie (≥ 0,2 mm) : poil mouillé = moins isolant
+   Hors créneau de sortie (box) : ni vent ni pluie ; ciel dégagé −2 °C (−0 si couvert).
    Sur une période (jour ou nuit) on retient l'heure la plus défavorable. */
 const LEVELS = ["Sans couverture","0 g imperméable","100 g","200 g"];
+function dehors(o){ return o.h>=settings.sortieDebut && o.h<settings.sortieFin; }
 function indiceHeure(o){
-  if(o.t==null) return null;
+  if(!o || o.t==null) return null;
+  if(!dehors(o)){                        // au box : ni vent ni pluie ; un ciel dégagé refroidit
+    const ciel = 2*(1 - (o.cc==null?50:o.cc)/100);
+    return {i: o.t - ciel, soleil:0, vent:0, pluie:0, ciel, box:true};
+  }
   const soleil = Math.min(4, (o.sw||0)/100);
   const vent = Math.min(8, Math.max(0, ((o.ws||0)-10)/5));
   const pluie = (o.p||0) >= 0.2 ? 3 : 0;
-  return {i: o.t + soleil - vent - pluie, soleil, vent, pluie};
+  return {i: o.t + soleil - vent - pluie, soleil, vent, pluie, ciel:0, box:false};
 }
 function couverture(h, w){
   if(w.indice==null) return null;
   const [a,b,c] = h.tondu ? settings.seuils.tondu : settings.seuils.nonTondu;
   let lvl = w.indice >= a ? 0 : w.indice >= b ? 1 : w.indice >= c ? 2 : 3;
   const raisons = [];
-  if(w.pluie >= settings.seuilPluie && lvl===0){ lvl = 1; raisons.push("pluie"); }
-  if((w.rafMax||0) >= settings.rafaleForte && lvl===0){ lvl = 1; raisons.push("vent fort"); }
+  if(!w.box && w.pluie >= settings.seuilPluie && lvl===0){ lvl = 1; raisons.push("pluie"); }
+  if(!w.box && (w.rafMax||0) >= settings.rafaleForte && lvl===0){ lvl = 1; raisons.push("vent fort"); }
   const limite = lvl===3 && w.indice < c-5;
   return {lvl, txt:LEVELS[lvl] + (raisons.length ? " ("+raisons.join(", ")+")" : "") + (limite ? " ⚠" : ""), limite};
 }
@@ -241,7 +261,6 @@ function process(j){
     });
     const o = {time:t, date:t.slice(0,10), h:parseInt(t.slice(11,13),10), per};
     for(const k in VARS) o[k] = avg(MODELS.map(m=>per[m.id][k]).filter(v=>v!=null));
-    o.ix = indiceHeure(o);
     return o;
   });
   const byDate = {};
@@ -294,19 +313,19 @@ function windows(date){
   const jour = all.filter(x => x.date===date && x.h>=d0 && x.h<d1);
   const next = nextDate(date);
   const nuit = all.filter(x => (x.date===date && x.h>=d1) || (x.date===next && x.h<d0));
-  const agg = arr => {
+  const agg = (arr, box) => {
     const t = arr.map(x=>x.t).filter(v=>v!=null);
-    const ix = arr.map(x=>x.ix).filter(Boolean);
+    const ix = arr.map(indiceHeure).filter(Boolean);
     const pire = ix.length ? ix.reduce((a,b)=> b.i<a.i ? b : a) : null;
     const nums = k => arr.map(x=>x[k]).filter(v=>v!=null);
     const cc = nums("cc"), ws = nums("ws"), wg = nums("wg");
-    return {n:arr.length, tmin: t.length?Math.min(...t):null, tmax: t.length?Math.max(...t):null,
+    return {box, n:arr.length, tmin: t.length?Math.min(...t):null, tmax: t.length?Math.max(...t):null,
             pluie: arr.reduce((a,x)=>a+(x.p||0),0), heuresPluie: arr.filter(x=>(x.p||0)>=0.1).length,
             indice: pire ? pire.i : null, pire,
             nuages: cc.length ? cc.reduce((a,b)=>a+b,0)/cc.length : null,
             ventMax: ws.length ? Math.max(...ws) : null, rafMax: wg.length ? Math.max(...wg) : null};
   };
-  return {jour:agg(jour), nuit:agg(nuit)};
+  return {jour:agg(jour,false), nuit:agg(nuit,true)};
 }
 function nextDate(d){ const x = new Date(d+"T12:00:00Z"); x.setUTCDate(x.getUTCDate()+1); return x.toISOString().slice(0,10); }
 
@@ -355,11 +374,11 @@ function dayLabel(d){
 }
 
 function chartSVG(day){
-  const W=340, Hh=130, L=28, R=28, T=10, B=22, iw=W-L-R, ih=Hh-T-B;
+  const W=340, Hh=160, L=28, R=28, T=10, B=22, iw=W-L-R, ih=Hh-T-B;
   const hrs = day.hrs;
   const maxP = Math.max(2, ...hrs.map(x=>x.p||0));
-  const ts = hrs.map(x=>x.t).concat(hrs.map(x=>x.ix?x.ix.i:null)).filter(v=>v!=null);
-  const tlo = Math.floor(Math.min(...ts)-1), thi = Math.ceil(Math.max(...ts)+1);
+  const ts = hrs.map(x=>x.t).concat(hrs.map(x=>{const v=indiceHeure(x);return v?v.i:null;})).filter(v=>v!=null);
+  const tlo = Math.floor((Math.min(...ts)-0.5)/2)*2, thi = Math.ceil((Math.max(...ts)+0.5)/2)*2;
   const bw = iw/24;
   const x = h => L + h*bw;
   const yP = p => T+ih - (p/maxP)*ih;
@@ -370,14 +389,17 @@ function chartSVG(day){
     s += `<line x1="${x(h)}" x2="${x(h)}" y1="${T}" y2="${T+ih}" stroke="var(--line)"/>`;
     s += `<text x="${x(h)}" y="${Hh-6}" font-size="10" text-anchor="middle" fill="var(--mute)">${h}h</text>`;
   });
+  for(let g = Math.ceil(tlo/2)*2; g <= thi; g += 2){
+    s += `<line x1="${L}" x2="${W-R}" y1="${yT(g)}" y2="${yT(g)}" stroke="var(--line)" stroke-width="${g===0?1.4:0.8}" ${g===0?'stroke-dasharray="3 2"':''}/>`;
+    s += `<text x="${L-3}" y="${yT(g)+3}" font-size="9" text-anchor="end" fill="var(--temp)">${g}°</text>`;
+  }
   hrs.forEach(o => {
     if((o.p||0) > 0) s += `<rect x="${x(o.h)+1}" y="${yP(o.p)}" width="${bw-2}" height="${T+ih-yP(o.p)}" fill="var(--rain)" rx="1.5"><title>${o.h}h : ${fmtP(o.p)}</title></rect>`;
   });
   const pts = hrs.filter(o=>o.t!=null).map(o => `${x(o.h)+bw/2},${yT(o.t)}`).join(" ");
   s += `<polyline points="${pts}" fill="none" stroke="var(--temp)" stroke-width="2.2" stroke-linejoin="round"/>`;
-  const pts2 = hrs.filter(o=>o.ix).map(o => `${x(o.h)+bw/2},${yT(o.ix.i)}`).join(" ");
+  const pts2 = hrs.filter(o=>indiceHeure(o)).map(o => `${x(o.h)+bw/2},${yT(indiceHeure(o).i)}`).join(" ");
   s += `<polyline points="${pts2}" fill="none" stroke="var(--ink)" stroke-width="1.6" stroke-dasharray="4 3" stroke-linejoin="round" opacity=".75"/>`;
-  s += `<text x="4" y="${T+8}" font-size="10" fill="var(--temp)">${thi}°</text><text x="4" y="${T+ih}" font-size="10" fill="var(--temp)">${tlo}°</text>`;
   s += `<text x="${W-2}" y="${T+8}" font-size="10" text-anchor="end" fill="var(--rain)">${maxP.toFixed(1).replace(".",",")}</text><text x="${W-2}" y="${T+ih}" font-size="10" text-anchor="end" fill="var(--rain)">0 mm</text>`;
   if(wx && day.date===wx.today){
     const now = new Date().getHours() + new Date().getMinutes()/60;
@@ -393,27 +415,30 @@ function renderPrev(){
   let html = demoBanner();
   wx.next.forEach((d,i) => {
     const w = windows(d.date);
-    html += `<div class="card">
-      <div class="row"><h2>${dayLabel(d.date)}</h2><span class="sp"></span><span class="badge ${d.conf.cls}">${d.conf.txt}</span></div>
-      <div class="stats">
-        <div class="stat"><div class="v t-min">${fmtT(d.tmin)}</div><div class="l">mini</div></div>
-        <div class="stat"><div class="v t-max">${fmtT(d.tmax)}</div><div class="l">maxi</div></div>
-        <div class="stat"><div class="v" style="color:var(--rain)">${fmtP(d.pluie)}</div><div class="l">pluie (${d.heuresPluie} h)</div></div>
+    const ccs = d.hrs.map(o=>o.cc).filter(v=>v!=null), nuages = ccs.length ? ccs.reduce((a,b)=>a+b,0)/ccs.length : null;
+    const fort = (w.jour.rafMax||0) >= settings.rafaleForte;
+    const kmh = v => v==null ? "–" : Math.round(v)+" km/h";
+    html += `<details class="card day" ${i<2?"open":""}>
+      <summary><div class="row"><h2>${dayLabel(d.date)}</h2><span class="sp"></span><span class="badge ${d.conf.cls}">${d.conf.txt}</span><span class="chev">▾</span></div>
+        <div class="resume mute">${fmtT(d.tmin)} / ${fmtT(d.tmax)} · ${fmtP(d.pluie)} · ressenti jour ${fmtT(w.jour.indice)}, nuit ${fmtT(w.nuit.indice)}</div></summary>
+      <div class="stats6">
+        <div class="s6"><div class="v t-min">${fmtT(d.tmin)}</div><div class="l">T° mini</div></div>
+        <div class="s6"><div class="v t-max">${fmtT(d.tmax)}</div><div class="l">T° maxi</div></div>
+        <div class="s6"><div class="v" style="color:var(--rain)">${fmtP(d.pluie)}</div><div class="l">pluie (${d.heuresPluie} h)</div></div>
+        <div class="s6"><div class="v" style="color:var(--mute)">${nuages==null?"–":Math.round(nuages)+" %"}</div><div class="l">nuages</div></div>
+        <div class="s6"><div class="v" style="color:var(--wind)">${kmh(w.jour.ventMax)}</div><div class="l">vent (sortie)</div></div>
+        <div class="s6"><div class="v" style="color:${fort?"var(--bad)":"var(--wind)"}">${kmh(w.jour.rafMax)}</div><div class="l">rafales (sortie)</div></div>
       </div>
-      <div class="stats">
-        <div class="stat"><div class="v">${w.jour.nuages==null?"–":Math.round(w.jour.nuages)+" %"}</div><div class="l">nuages (journée)</div></div>
-        <div class="stat"><div class="v">${w.jour.ventMax==null?"–":Math.round(Math.max(w.jour.ventMax, w.nuit.ventMax||0))} km/h</div><div class="l">vent maxi</div></div>
-        <div class="stat"><div class="v" style="${Math.max(w.jour.rafMax||0,w.nuit.rafMax||0)>=settings.rafaleForte?"color:var(--bad)":""}">${w.jour.rafMax==null?"–":Math.round(Math.max(w.jour.rafMax, w.nuit.rafMax||0))} km/h</div><div class="l">rafales</div></div>
-      </div>
-      <div class="mute">Sortie ${settings.sortieDebut}h–${settings.sortieFin}h : ${fmtT(w.jour.tmin)} à ${fmtT(w.jour.tmax)}, ${fmtP(w.jour.pluie)} · Nuit : mini ${fmtT(w.nuit.tmin)}, ${fmtP(w.nuit.pluie)}${w.nuit.n<14?" (partielle)":""}</div>
-      <div style="margin-top:6px"><b>Ressenti cheval</b> (heure la plus défavorable) : <span class="pill">☀ Jour ${fmtT(w.jour.indice)}</span><span class="pill n">☾ Nuit ${fmtT(w.nuit.indice)}</span>
-        <div class="mute" style="font-size:12px">${detailIndice("Jour", w.jour.pire)} · ${detailIndice("Nuit", w.nuit.pire)}</div></div>
+      <div class="mute">Pré ${settings.sortieDebut}h–${settings.sortieFin}h : ${fmtT(w.jour.tmin)} à ${fmtT(w.jour.tmax)}, ${fmtP(w.jour.pluie)} · Box (nuit) : mini ${fmtT(w.nuit.tmin)}${w.nuit.n<14?" (partielle)":""}</div>
+      <div style="margin-top:8px"><b>Ressenti cheval</b> <span class="mute">(heure la plus défavorable)</span>
+        <div class="pill">☀ Pré ${fmtT(w.jour.indice)} <span class="mute">· ${detailIndice("", w.jour.pire)}</span></div>
+        <div class="pill n">☾ Box ${fmtT(w.nuit.indice)} <span class="mute">· ${detailIndice("", w.nuit.pire)}</span></div></div>
       ${chartSVG(d)}
       <div class="legend"><span><i style="background:var(--temp)"></i>Température</span><span><i style="background:none;border-top:2px dashed var(--ink);height:0;vertical-align:3px"></i>Ressenti cheval</span><span><i style="background:var(--rain)"></i>Pluie / heure</span><span><i style="background:var(--green-l);border:1px solid var(--line)"></i>Heures de sortie</span></div>
       ${horsesRec(w)}
       <button class="link" data-detail="${i}">Détail heure par heure</button>
       <div class="hidden" id="detail-${i}">${detailTable(d)}</div>
-    </div>`;
+    </details>`;
   });
   html += `<div class="mute" style="text-align:center;margin:8px 0 20px">${demo?"Données d'exemple":"Mis à jour "+new Date(wx.fetched).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})+" · Open-Meteo (Météo-France + ECMWF)"}<br><button class="link" id="refresh">Actualiser</button></div>`;
   el.innerHTML = html;
@@ -428,24 +453,27 @@ function horsesRec(w){
   return `<div class="horses">` + horses.map(h => {
     const cj = couverture(h, w.jour), cn = couverture(h, w.nuit);
     return `<div class="hrec">${headSVG(h)}<div><div class="nm">${esc(h.name)} <span class="mute">· ${h.tondu?"tondu":"non tondu"}</span></div>
-      <span class="pill">☀ Jour : ${cj?cj.txt:"–"}</span><span class="pill n">☾ Nuit : ${cn?cn.txt:"–"}</span></div></div>`;
+      <div class="pill">☀ Jour (pré) : <b>${cj?cj.txt:"–"}</b></div><div class="pill n">☾ Nuit (box) : <b>${cn?cn.txt:"–"}</b></div></div></div>`;
   }).join("") + `</div><div class="mute" style="margin-top:6px;font-size:12px">Seuils provisoires, réglables dans Réglages. ⚠ = plus froid que ce que couvre une 200 g.</div>`;
 }
 function detailIndice(nom, p){
-  if(!p) return nom+" : –";
+  const pre = nom ? nom+" : " : "";
+  if(!p) return pre+"–";
   const f = v => (Math.round(v*10)/10).toFixed(1).replace(".",",");
   const parts = [];
   if(p.soleil>0.05) parts.push("soleil +"+f(p.soleil));
   if(p.vent>0.05) parts.push("vent −"+f(p.vent));
   if(p.pluie) parts.push("pluie −3");
-  return nom+" : "+(parts.length ? parts.join(", ") : "sans correction");
+  if(p.ciel>0.05) parts.push("ciel dégagé −"+f(p.ciel));
+  if(p.box) parts.unshift("au box");
+  return pre+(parts.length ? parts.join(", ") : "sans correction");
 }
 function detailTable(d){
   let t = `<table><tr><th>Heure</th><th>T°</th><th>Ress.</th><th>Pluie</th><th>Vent</th><th>Raf.</th><th>Nuages</th></tr>`;
   d.hrs.forEach(o => {
     const out = o.h>=settings.sortieDebut && o.h<settings.sortieFin;
     const r = v => v==null ? "–" : Math.round(v);
-    t += `<tr class="${out?"out":""}"><td>${String(o.h).padStart(2,"0")}h</td><td>${fmtT(o.t)}</td><td><b>${o.ix?fmtT(o.ix.i):"–"}</b></td><td>${(o.p||0)>0?String(Math.round(o.p*10)/10).replace(".",","):"–"}</td><td>${r(o.ws)}</td><td>${r(o.wg)}</td><td>${o.cc==null?"–":Math.round(o.cc)+"%"}</td></tr>`;
+    t += `<tr class="${out?"out":""}"><td>${String(o.h).padStart(2,"0")}h</td><td>${fmtT(o.t)}</td><td><b>${indiceHeure(o)?fmtT(indiceHeure(o).i):"–"}</b></td><td>${(o.p||0)>0?String(Math.round(o.p*10)/10).replace(".",","):"–"}</td><td>${r(o.ws)}</td><td>${r(o.wg)}</td><td>${o.cc==null?"–":Math.round(o.cc)+"%"}</td></tr>`;
   });
   return t + `</table><div class="mute" style="font-size:12px;margin-top:4px">Ress. = ressenti cheval (°C). Pluie en mm, vent et rafales en km/h. Moyenne Météo-France + ECMWF. Lignes vertes = heures de sortie.</div>`;
 }
@@ -580,13 +608,13 @@ function renderReglages(){
   </div>
   <div class="card">
     <h2>Ressenti cheval</h2>
-    <div class="mute" style="margin:4px 0 8px">Pour chaque heure : température <b>+ soleil</b> (+1° par 100 W/m², max +4°) <b>− vent</b> (−1° par 5 km/h au-delà de 10 km/h, max −8°) <b>− pluie</b> (−3° si l'heure est pluvieuse). Sur le jour ou la nuit, on retient l'heure la plus défavorable.</div>
+    <div class="mute" style="margin:4px 0 8px">Pour chaque heure : température <b>+ soleil</b> (+1° par 100 W/m², max +4°) <b>− vent</b> (−1° par 5 km/h au-delà de 10 km/h, max −8°) <b>− pluie</b> (−3° si l'heure est pluvieuse). Hors créneau de sortie, les chevaux sont au box : ni vent ni pluie, mais un ciel dégagé retire jusqu'à 2° (0 si couvert). Sur le jour ou la nuit, on retient l'heure la plus défavorable.</div>
     <h2 style="margin-top:14px">Seuils de couverture</h2>
     <div class="mute" style="margin:4px 0">Couvertures disponibles : 0 g imperméable, 100 g, 200 g.</div>
     ${seuilsForm("nonTondu","Non tondu")}${seuilsForm("tondu","Tondu")}
     <label>Rafales qui imposent une couverture (km/h)</label>
     <input type="number" id="raf" value="${settings.rafaleForte}" inputmode="numeric">
-    <div class="mute" style="margin-top:8px">La pluie (≥ seuil) ou des rafales fortes imposent au minimum la 0 g imperméable.</div>
+    <div class="mute" style="margin-top:8px">Au pré, la pluie (≥ seuil) ou des rafales fortes imposent au minimum la 0 g imperméable.</div>
     <button class="link" id="resetSeuils">Revenir aux seuils par défaut</button>
   </div>
   <div class="card mute" style="font-size:13px">Sources : Open-Meteo, modèles Météo-France (AROME 1,5 km à 2 jours puis ARPEGE) et ECMWF (modèle européen). Indice de confiance = accord entre les deux modèles.</div>`;
