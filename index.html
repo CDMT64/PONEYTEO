@@ -93,6 +93,8 @@ tr.tot td{font-weight:700;border-top:2px solid var(--ink)}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 .results button{display:block;width:100%;text-align:left;margin-top:6px}
 .hidden{display:none}
+button.btn.refresh{display:block;width:100%;padding:16px;font-size:17px;font-weight:650;border-radius:14px;margin:4px 0 0}
+button.btn.refresh:disabled{opacity:.6}
 </style>
 </head>
 <body>
@@ -429,10 +431,11 @@ function renderPrev(){
         <div class="s6"><div class="v" style="color:var(--wind)">${kmh(w.jour.ventMax)}</div><div class="l">vent (sortie)</div></div>
         <div class="s6"><div class="v" style="color:${fort?"var(--bad)":"var(--wind)"}">${kmh(w.jour.rafMax)}</div><div class="l">rafales (sortie)</div></div>
       </div>
-      <div class="mute">Pré ${settings.sortieDebut}h–${settings.sortieFin}h : ${fmtT(w.jour.tmin)} à ${fmtT(w.jour.tmax)}, ${fmtP(w.jour.pluie)} · Box (nuit) : mini ${fmtT(w.nuit.tmin)}${w.nuit.n<14?" (partielle)":""}</div>
+      <div class="mute"><b style="color:var(--ink)">Pré :</b> ${settings.sortieDebut}h–${settings.sortieFin}h, ${fmtT(w.jour.tmin)} à ${fmtT(w.jour.tmax)}, ${fmtP(w.jour.pluie)}</div>
+      <div class="mute"><b style="color:var(--ink)">Nuit :</b> au box, mini ${fmtT(w.nuit.tmin)}${w.nuit.n<14?" (données partielles)":""}</div>
       <div style="margin-top:8px"><b>Ressenti cheval</b> <span class="mute">(heure la plus défavorable)</span>
         <div class="pill">☀ Pré ${fmtT(w.jour.indice)} <span class="mute">· ${detailIndice("", w.jour.pire)}</span></div>
-        <div class="pill n">☾ Box ${fmtT(w.nuit.indice)} <span class="mute">· ${detailIndice("", w.nuit.pire)}</span></div></div>
+        <div class="pill n">☾ Nuit ${fmtT(w.nuit.indice)} <span class="mute">· ${detailIndice("", w.nuit.pire)}</span></div></div>
       ${chartSVG(d)}
       <div class="legend"><span><i style="background:var(--temp)"></i>Température</span><span><i style="background:none;border-top:2px dashed var(--ink);height:0;vertical-align:3px"></i>Ressenti cheval</span><span><i style="background:var(--rain)"></i>Pluie / heure</span><span><i style="background:var(--green-l);border:1px solid var(--line)"></i>Heures de sortie</span></div>
       ${horsesRec(w)}
@@ -440,13 +443,21 @@ function renderPrev(){
       <div class="hidden" id="detail-${i}">${detailTable(d)}</div>
     </details>`;
   });
-  html += `<div class="mute" style="text-align:center;margin:8px 0 20px">${demo?"Données d'exemple":"Mis à jour "+new Date(wx.fetched).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})+" · Open-Meteo (Météo-France + ECMWF)"}<br><button class="link" id="refresh">Actualiser</button></div>`;
+  const majTxt = demo ? "Données d'exemple" : "Mis à jour le "+new Date(wx.fetched).toLocaleDateString("fr-FR",{day:"numeric",month:"short"})+" à "+new Date(wx.fetched).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
+  html += `<button class="btn refresh" id="refresh">⟳ Actualiser la météo</button>
+    <div class="mute" style="text-align:center;margin:6px 0 20px">${majTxt}${demo?"":" · Open-Meteo (Météo-France + ECMWF)"}<br>Mise à jour automatique à l'ouverture et toutes les 30 min.</div>`;
   el.innerHTML = html;
   el.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => {
     const t = document.getElementById("detail-"+b.dataset.detail); t.classList.toggle("hidden");
     b.textContent = t.classList.contains("hidden") ? "Détail heure par heure" : "Masquer le détail";
   });
-  const rf = document.getElementById("refresh"); if(rf) rf.onclick = () => load(true);
+  const rf = document.getElementById("refresh");
+  if(rf) rf.onclick = async () => {
+    if(demo){ startDemo(); return; }
+    rf.disabled = true; rf.textContent = "⟳ Actualisation…";
+    await load(true);
+    if(document.body.contains(rf)){ rf.disabled = false; rf.textContent = "⟳ Actualiser la météo"; }
+  };
 }
 function horsesRec(w){
   if(!horses.length) return `<div class="mute" style="margin-top:8px">Ajoute tes chevaux dans l'onglet « Chevaux » pour avoir une proposition de couverture.</div>`;
@@ -695,6 +706,9 @@ if("serviceWorker" in navigator && location.protocol.startsWith("http")){
   try{ navigator.serviceWorker.register("sw.js").catch(()=>{}); }catch(e){}
 }
 load(false);
+// Mise à jour automatique : au retour sur l'appli et toutes les 30 min
+document.addEventListener("visibilitychange", () => { if(document.visibilityState==="visible" && !demo) load(false); });
+setInterval(() => { if(document.visibilityState==="visible" && !demo) load(false); }, 30*60e3);
 </script>
 </body>
 </html>
