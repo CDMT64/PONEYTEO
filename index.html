@@ -109,8 +109,11 @@ const store = {
 let settings = Object.assign({
   lieu:null,            // {name, lat, lon}
   sortieDebut:8, sortieFin:18,
-  seuilPluie:1          // mm sur la période pour considérer "pluie"
+  seuilPluie:1,         // mm sur la période pour considérer "pluie"
+  rafaleForte:50,       // km/h : au-delà, couverture imposée
+  seuils:{ nonTondu:[2,-3,-8], tondu:[12,8,3] }   // indice ≥ a : rien · ≥ b : 0 g · ≥ c : 100 g · sinon 200 g
 }, store.get("settings", {}));
+if(!settings.seuils || !settings.seuils.tondu) settings.seuils = {nonTondu:[2,-3,-8], tondu:[12,8,3]};
 let horses = store.get("horses", []);
 let wx = null;          // données météo traitées
 let demo = false;
@@ -122,25 +125,29 @@ const MODELS = [
   {id:"ecmwf_ifs025",         label:"ECMWF (européen)",          short:"ECMWF"}
 ];
 
-/* ================= Règles couvertures (PROVISOIRES) =================
-   Niveaux : 0 rien · 1 imperméable 0 g · 2 100 g · 3 200 g · 4 300 g · 5 400 g
-   Température de référence = minimum prévu sur la période (jour ou nuit).
-   À remplacer par les critères de l'utilisateur. */
-const LEVELS = ["Sans couverture","Imperméable 0 g","100 g","200 g","300 g","400 g"];
-const RULES = {
-  tondu:    [ {min:15,lvl:0}, {min:10,lvl:2}, {min:5,lvl:3}, {min:0,lvl:4}, {min:-99,lvl:5} ],
-  nonTondu: [ {min:0,lvl:0}, {min:-5,lvl:2}, {min:-99,lvl:3} ]
-};
-function couverture(h, tmin, pluieMm){
-  if(tmin==null) return null;
-  const table = h.tondu ? RULES.tondu : RULES.nonTondu;
-  let lvl = table.find(r => tmin >= r.min).lvl;
-  const pluie = pluieMm >= settings.seuilPluie;
-  if(pluie){
-    if(lvl===0 && tmin < (h.tondu?18:12)) lvl = 1;          // pluie : au moins une imperméable
-    else if(!h.tondu && lvl>=1) lvl = Math.min(lvl+1, 5);    // non tondu mouillé : +1 cran
-  }
-  return {lvl, txt:LEVELS[lvl], pluie};
+/* ================= Indice « ressenti cheval » =================
+   Par heure : indice = température + bonus soleil − malus vent − malus pluie
+   - soleil : +1 °C par 100 W/m² de rayonnement solaire (max +4 °C) ; nul la nuit
+   - vent   : −1 °C par 5 km/h au-delà de 10 km/h (max −8 °C)
+   - pluie  : −3 °C pour une heure de pluie (≥ 0,2 mm) : poil mouillé = moins isolant
+   Sur une période (jour ou nuit) on retient l'heure la plus défavorable. */
+const LEVELS = ["Sans couverture","0 g imperméable","100 g","200 g"];
+function indiceHeure(o){
+  if(o.t==null) return null;
+  const soleil = Math.min(4, (o.sw||0)/100);
+  const vent = Math.min(8, Math.max(0, ((o.ws||0)-10)/5));
+  const pluie = (o.p||0) >= 0.2 ? 3 : 0;
+  return {i: o.t + soleil - vent - pluie, soleil, vent, pluie};
+}
+function couverture(h, w){
+  if(w.indice==null) return null;
+  const [a,b,c] = h.tondu ? settings.seuils.tondu : settings.seuils.nonTondu;
+  let lvl = w.indice >= a ? 0 : w.indice >= b ? 1 : w.indice >= c ? 2 : 3;
+  const raisons = [];
+  if(w.pluie >= settings.seuilPluie && lvl===0){ lvl = 1; raisons.push("pluie"); }
+  if((w.rafMax||0) >= settings.rafaleForte && lvl===0){ lvl = 1; raisons.push("vent fort"); }
+  const limite = lvl===3 && w.indice < c-5;
+  return {lvl, txt:LEVELS[lvl] + (raisons.length ? " ("+raisons.join(", ")+")" : "") + (limite ? " ⚠" : ""), limite};
 }
 
 /* ================= Têtes de chevaux (SVG) ================= */
@@ -213,7 +220,7 @@ function esc(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&l
 async function fetchWeather(){
   const {lat, lon} = settings.lieu;
   const url = "https://api.open-meteo.com/v1/forecast?latitude="+lat+"&longitude="+lon+
-    "&hourly=temperature_2m,precipitation&models="+MODELS.map(m=>m.id).join(",")+
+    "&hourly=temperature_2m,precipitation,cloud_cover,wind_speed_10m,wind_gusts_10m,shortwave_radiation&models="+MODELS.map(m=>m.id).join(",")+
     "&past_days=7&forecast_days=4&timezone=auto";
   const r = await fetch(url);
   if(!r.ok) throw new Error("Open-Meteo a répondu "+r.status);
@@ -224,19 +231,18 @@ async function fetchWeather(){
 function process(j){
   const H = j.hourly, times = H.time;
   const pick = (v, m) => H[v+"_"+m] || (MODELS.length===1 ? H[v] : null);
+  const VARS = {t:"temperature_2m", p:"precipitation", cc:"cloud_cover", ws:"wind_speed_10m", wg:"wind_gusts_10m", sw:"shortwave_radiation"};
+  const avg = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : null;
   const hours = times.map((t,i) => {
     const per = {};
     MODELS.forEach(m => {
-      const T = pick("temperature_2m", m.id), P = pick("precipitation", m.id);
-      per[m.id] = {t: T ? T[i] : null, p: P ? P[i] : null};
+      per[m.id] = {};
+      for(const k in VARS){ const A = pick(VARS[k], m.id); per[m.id][k] = A && A[i]!=null ? A[i] : null; }
     });
-    const ts = MODELS.map(m=>per[m.id].t).filter(v=>v!=null);
-    const ps = MODELS.map(m=>per[m.id].p).filter(v=>v!=null);
-    return {
-      time:t, date:t.slice(0,10), h:parseInt(t.slice(11,13),10), per,
-      t: ts.length ? ts.reduce((a,b)=>a+b,0)/ts.length : null,
-      p: ps.length ? ps.reduce((a,b)=>a+b,0)/ps.length : null
-    };
+    const o = {time:t, date:t.slice(0,10), h:parseInt(t.slice(11,13),10), per};
+    for(const k in VARS) o[k] = avg(MODELS.map(m=>per[m.id][k]).filter(v=>v!=null));
+    o.ix = indiceHeure(o);
+    return o;
   });
   const byDate = {};
   hours.forEach(x => (byDate[x.date] = byDate[x.date] || []).push(x));
@@ -290,8 +296,15 @@ function windows(date){
   const nuit = all.filter(x => (x.date===date && x.h>=d1) || (x.date===next && x.h<d0));
   const agg = arr => {
     const t = arr.map(x=>x.t).filter(v=>v!=null);
+    const ix = arr.map(x=>x.ix).filter(Boolean);
+    const pire = ix.length ? ix.reduce((a,b)=> b.i<a.i ? b : a) : null;
+    const nums = k => arr.map(x=>x[k]).filter(v=>v!=null);
+    const cc = nums("cc"), ws = nums("ws"), wg = nums("wg");
     return {n:arr.length, tmin: t.length?Math.min(...t):null, tmax: t.length?Math.max(...t):null,
-            pluie: arr.reduce((a,x)=>a+(x.p||0),0), heuresPluie: arr.filter(x=>(x.p||0)>=0.1).length};
+            pluie: arr.reduce((a,x)=>a+(x.p||0),0), heuresPluie: arr.filter(x=>(x.p||0)>=0.1).length,
+            indice: pire ? pire.i : null, pire,
+            nuages: cc.length ? cc.reduce((a,b)=>a+b,0)/cc.length : null,
+            ventMax: ws.length ? Math.max(...ws) : null, rafMax: wg.length ? Math.max(...wg) : null};
   };
   return {jour:agg(jour), nuit:agg(nuit)};
 }
@@ -302,7 +315,8 @@ function demoData(){
   const now = new Date(); now.setMinutes(0,0,0);
   const start = new Date(now); start.setDate(start.getDate()-7); start.setHours(0);
   const time=[], h = {};
-  MODELS.forEach(m => { h["temperature_2m_"+m.id]=[]; h["precipitation_"+m.id]=[]; });
+  const V = ["temperature_2m","precipitation","cloud_cover","wind_speed_10m","wind_gusts_10m","shortwave_radiation"];
+  MODELS.forEach(m => V.forEach(v => h[v+"_"+m.id]=[]));
   let seed = 7; const rnd = () => (seed = (seed*9301+49297)%233280)/233280;
   for(let i=0;i<11*24;i++){
     const d = new Date(start.getTime()+i*3600e3);
@@ -315,6 +329,13 @@ function demoData(){
       h["temperature_2m_"+m.id].push(+(base + (k? (day>8?1.8:0.5):0) + (rnd()-.5)).toFixed(1));
       const p = rainy ? Math.max(0, (rnd()*1.6 - 0.3) * (k? 1+(day>8?0.8:0.15):1)) : 0;
       h["precipitation_"+m.id].push(+p.toFixed(1));
+      const cc = rainy ? 95 : Math.max(0, Math.min(100, 50 + 45*Math.sin(day*1.3+k*.3)));
+      h["cloud_cover_"+m.id].push(Math.round(cc));
+      const ws = Math.max(3, 14 + 12*Math.sin(day*0.8+1) + (rainy?8:0) + (rnd()-.5)*4);
+      h["wind_speed_10m_"+m.id].push(+ws.toFixed(1));
+      h["wind_gusts_10m_"+m.id].push(+(ws*1.7).toFixed(1));
+      const el = Math.max(0, Math.sin((hr-8)/9*Math.PI));
+      h["shortwave_radiation_"+m.id].push(hr>=8&&hr<=17 ? Math.round(380*el*(1-cc/110)) : 0);
     });
   }
   return {timezone:"Europe/Paris", utc_offset_seconds:-now.getTimezoneOffset()*60, hourly:Object.assign({time}, h)};
@@ -337,7 +358,7 @@ function chartSVG(day){
   const W=340, Hh=130, L=28, R=28, T=10, B=22, iw=W-L-R, ih=Hh-T-B;
   const hrs = day.hrs;
   const maxP = Math.max(2, ...hrs.map(x=>x.p||0));
-  const ts = hrs.map(x=>x.t).filter(v=>v!=null);
+  const ts = hrs.map(x=>x.t).concat(hrs.map(x=>x.ix?x.ix.i:null)).filter(v=>v!=null);
   const tlo = Math.floor(Math.min(...ts)-1), thi = Math.ceil(Math.max(...ts)+1);
   const bw = iw/24;
   const x = h => L + h*bw;
@@ -354,6 +375,8 @@ function chartSVG(day){
   });
   const pts = hrs.filter(o=>o.t!=null).map(o => `${x(o.h)+bw/2},${yT(o.t)}`).join(" ");
   s += `<polyline points="${pts}" fill="none" stroke="var(--temp)" stroke-width="2.2" stroke-linejoin="round"/>`;
+  const pts2 = hrs.filter(o=>o.ix).map(o => `${x(o.h)+bw/2},${yT(o.ix.i)}`).join(" ");
+  s += `<polyline points="${pts2}" fill="none" stroke="var(--ink)" stroke-width="1.6" stroke-dasharray="4 3" stroke-linejoin="round" opacity=".75"/>`;
   s += `<text x="4" y="${T+8}" font-size="10" fill="var(--temp)">${thi}°</text><text x="4" y="${T+ih}" font-size="10" fill="var(--temp)">${tlo}°</text>`;
   s += `<text x="${W-2}" y="${T+8}" font-size="10" text-anchor="end" fill="var(--rain)">${maxP.toFixed(1).replace(".",",")}</text><text x="${W-2}" y="${T+ih}" font-size="10" text-anchor="end" fill="var(--rain)">0 mm</text>`;
   if(wx && day.date===wx.today){
@@ -377,9 +400,16 @@ function renderPrev(){
         <div class="stat"><div class="v t-max">${fmtT(d.tmax)}</div><div class="l">maxi</div></div>
         <div class="stat"><div class="v" style="color:var(--rain)">${fmtP(d.pluie)}</div><div class="l">pluie (${d.heuresPluie} h)</div></div>
       </div>
+      <div class="stats">
+        <div class="stat"><div class="v">${w.jour.nuages==null?"–":Math.round(w.jour.nuages)+" %"}</div><div class="l">nuages (journée)</div></div>
+        <div class="stat"><div class="v">${w.jour.ventMax==null?"–":Math.round(Math.max(w.jour.ventMax, w.nuit.ventMax||0))} km/h</div><div class="l">vent maxi</div></div>
+        <div class="stat"><div class="v" style="${Math.max(w.jour.rafMax||0,w.nuit.rafMax||0)>=settings.rafaleForte?"color:var(--bad)":""}">${w.jour.rafMax==null?"–":Math.round(Math.max(w.jour.rafMax, w.nuit.rafMax||0))} km/h</div><div class="l">rafales</div></div>
+      </div>
       <div class="mute">Sortie ${settings.sortieDebut}h–${settings.sortieFin}h : ${fmtT(w.jour.tmin)} à ${fmtT(w.jour.tmax)}, ${fmtP(w.jour.pluie)} · Nuit : mini ${fmtT(w.nuit.tmin)}, ${fmtP(w.nuit.pluie)}${w.nuit.n<14?" (partielle)":""}</div>
+      <div style="margin-top:6px"><b>Ressenti cheval</b> (heure la plus défavorable) : <span class="pill">☀ Jour ${fmtT(w.jour.indice)}</span><span class="pill n">☾ Nuit ${fmtT(w.nuit.indice)}</span>
+        <div class="mute" style="font-size:12px">${detailIndice("Jour", w.jour.pire)} · ${detailIndice("Nuit", w.nuit.pire)}</div></div>
       ${chartSVG(d)}
-      <div class="legend"><span><i style="background:var(--temp)"></i>Température</span><span><i style="background:var(--rain)"></i>Pluie / heure</span><span><i style="background:var(--green-l);border:1px solid var(--line)"></i>Heures de sortie</span></div>
+      <div class="legend"><span><i style="background:var(--temp)"></i>Température</span><span><i style="background:none;border-top:2px dashed var(--ink);height:0;vertical-align:3px"></i>Ressenti cheval</span><span><i style="background:var(--rain)"></i>Pluie / heure</span><span><i style="background:var(--green-l);border:1px solid var(--line)"></i>Heures de sortie</span></div>
       ${horsesRec(w)}
       <button class="link" data-detail="${i}">Détail heure par heure</button>
       <div class="hidden" id="detail-${i}">${detailTable(d)}</div>
@@ -396,18 +426,28 @@ function renderPrev(){
 function horsesRec(w){
   if(!horses.length) return `<div class="mute" style="margin-top:8px">Ajoute tes chevaux dans l'onglet « Chevaux » pour avoir une proposition de couverture.</div>`;
   return `<div class="horses">` + horses.map(h => {
-    const cj = couverture(h, w.jour.tmin, w.jour.pluie), cn = couverture(h, w.nuit.tmin, w.nuit.pluie);
+    const cj = couverture(h, w.jour), cn = couverture(h, w.nuit);
     return `<div class="hrec">${headSVG(h)}<div><div class="nm">${esc(h.name)} <span class="mute">· ${h.tondu?"tondu":"non tondu"}</span></div>
       <span class="pill">☀ Jour : ${cj?cj.txt:"–"}</span><span class="pill n">☾ Nuit : ${cn?cn.txt:"–"}</span></div></div>`;
-  }).join("") + `</div><div class="mute" style="margin-top:6px;font-size:12px">Règles provisoires (en attente de tes critères).</div>`;
+  }).join("") + `</div><div class="mute" style="margin-top:6px;font-size:12px">Seuils provisoires, réglables dans Réglages. ⚠ = plus froid que ce que couvre une 200 g.</div>`;
+}
+function detailIndice(nom, p){
+  if(!p) return nom+" : –";
+  const f = v => (Math.round(v*10)/10).toFixed(1).replace(".",",");
+  const parts = [];
+  if(p.soleil>0.05) parts.push("soleil +"+f(p.soleil));
+  if(p.vent>0.05) parts.push("vent −"+f(p.vent));
+  if(p.pluie) parts.push("pluie −3");
+  return nom+" : "+(parts.length ? parts.join(", ") : "sans correction");
 }
 function detailTable(d){
-  let t = `<table><tr><th>Heure</th><th>T°</th><th>Pluie</th>${MODELS.map(m=>`<th>${m.short}</th>`).join("")}</tr>`;
+  let t = `<table><tr><th>Heure</th><th>T°</th><th>Ress.</th><th>Pluie</th><th>Vent</th><th>Raf.</th><th>Nuages</th></tr>`;
   d.hrs.forEach(o => {
     const out = o.h>=settings.sortieDebut && o.h<settings.sortieFin;
-    t += `<tr class="${out?"out":""}"><td>${String(o.h).padStart(2,"0")}h</td><td>${fmtT(o.t)}</td><td>${(o.p||0)>0?fmtP(o.p):"–"}</td>${MODELS.map(m=>{const v=o.per[m.id];return `<td class="mute">${v.t==null?"–":fmtT(v.t)} / ${v.p==null?"–":String(v.p).replace(".",",")}</td>`;}).join("")}</tr>`;
+    const r = v => v==null ? "–" : Math.round(v);
+    t += `<tr class="${out?"out":""}"><td>${String(o.h).padStart(2,"0")}h</td><td>${fmtT(o.t)}</td><td><b>${o.ix?fmtT(o.ix.i):"–"}</b></td><td>${(o.p||0)>0?String(Math.round(o.p*10)/10).replace(".",","):"–"}</td><td>${r(o.ws)}</td><td>${r(o.wg)}</td><td>${o.cc==null?"–":Math.round(o.cc)+"%"}</td></tr>`;
   });
-  return t + `</table><div class="mute" style="font-size:12px;margin-top:4px">Colonnes modèles : température / pluie (mm). Lignes vertes = heures de sortie.</div>`;
+  return t + `</table><div class="mute" style="font-size:12px;margin-top:4px">Ress. = ressenti cheval (°C). Pluie en mm, vent et rafales en km/h. Moyenne Météo-France + ECMWF. Lignes vertes = heures de sortie.</div>`;
 }
 
 function renderBilan(){
@@ -511,6 +551,14 @@ function bindForm(){
   };
 }
 
+function seuilsForm(k, titre){
+  const s = settings.seuils[k], inp = i => `<input type="number" step="0.5" data-seuil="${k}:${i}" value="${s[i]}" style="width:70px;padding:6px">`;
+  return `<h3>${titre}</h3><table>
+    <tr><td>Ressenti ≥ ${inp(0)}°</td><td>${LEVELS[0]}</td></tr>
+    <tr><td>Ressenti ≥ ${inp(1)}°</td><td>${LEVELS[1]}</td></tr>
+    <tr><td>Ressenti ≥ ${inp(2)}°</td><td>${LEVELS[2]}</td></tr>
+    <tr><td>En dessous</td><td>${LEVELS[3]}</td></tr></table>`;
+}
 function renderReglages(){
   const el = document.getElementById("tab-reglages");
   const opts = n => Array.from({length:24},(_,i)=>`<option value="${i}" ${i===n?"selected":""}>${i}h</option>`).join("");
@@ -531,11 +579,15 @@ function renderReglages(){
     <select id="sp">${[0.2,0.5,1,2,3,5].map(v=>`<option value="${v}" ${v===settings.seuilPluie?"selected":""}>${String(v).replace(".",",")} mm</option>`).join("")}</select>
   </div>
   <div class="card">
-    <h2>Règles de couverture (provisoires)</h2>
-    <div class="mute" style="margin:4px 0 8px">Basées sur la température mini de la période. En attente de tes critères.</div>
-    <h3>Tondu</h3><table>${RULES.tondu.map((r,i,a)=>`<tr><td>${i===0?"≥ "+r.min+"°":r.min===-99?"< "+a[i-1].min+"°":r.min+"° à "+a[i-1].min+"°"}</td><td>${LEVELS[r.lvl]}</td></tr>`).join("")}</table>
-    <h3>Non tondu</h3><table>${RULES.nonTondu.map((r,i,a)=>`<tr><td>${i===0?"≥ "+r.min+"°":r.min===-99?"< "+a[i-1].min+"°":r.min+"° à "+a[i-1].min+"°"}</td><td>${LEVELS[r.lvl]}</td></tr>`).join("")}</table>
-    <div class="mute" style="margin-top:8px">Pluie ≥ seuil : au moins une imperméable ; non tondu déjà couvert : +1 cran.</div>
+    <h2>Ressenti cheval</h2>
+    <div class="mute" style="margin:4px 0 8px">Pour chaque heure : température <b>+ soleil</b> (+1° par 100 W/m², max +4°) <b>− vent</b> (−1° par 5 km/h au-delà de 10 km/h, max −8°) <b>− pluie</b> (−3° si l'heure est pluvieuse). Sur le jour ou la nuit, on retient l'heure la plus défavorable.</div>
+    <h2 style="margin-top:14px">Seuils de couverture</h2>
+    <div class="mute" style="margin:4px 0">Couvertures disponibles : 0 g imperméable, 100 g, 200 g.</div>
+    ${seuilsForm("nonTondu","Non tondu")}${seuilsForm("tondu","Tondu")}
+    <label>Rafales qui imposent une couverture (km/h)</label>
+    <input type="number" id="raf" value="${settings.rafaleForte}" inputmode="numeric">
+    <div class="mute" style="margin-top:8px">La pluie (≥ seuil) ou des rafales fortes imposent au minimum la 0 g imperméable.</div>
+    <button class="link" id="resetSeuils">Revenir aux seuils par défaut</button>
   </div>
   <div class="card mute" style="font-size:13px">Sources : Open-Meteo, modèles Météo-France (AROME 1,5 km à 2 jours puis ARPEGE) et ECMWF (modèle européen). Indice de confiance = accord entre les deux modèles.</div>`;
   const $ = id => document.getElementById(id);
@@ -543,6 +595,12 @@ function renderReglages(){
   $("s1").onchange = e => { settings.sortieDebut = +e.target.value; save(); };
   $("s2").onchange = e => { settings.sortieFin = +e.target.value; save(); };
   $("sp").onchange = e => { settings.seuilPluie = +e.target.value; save(); };
+  $("raf").onchange = e => { settings.rafaleForte = +e.target.value || 50; save(); };
+  el.querySelectorAll("[data-seuil]").forEach(inp => inp.onchange = () => {
+    const [k,i] = inp.dataset.seuil.split(":"); const v = parseFloat(inp.value.replace(",","."));
+    if(!isNaN(v)){ settings.seuils[k][+i] = v; save(); renderReglages(); }
+  });
+  $("resetSeuils").onclick = () => { settings.seuils = {nonTondu:[2,-3,-8], tondu:[12,8,3]}; settings.rafaleForte = 50; save(); renderReglages(); };
   const search = async () => {
     const q = $("q").value.trim(); if(!q) return;
     $("res").innerHTML = `<div class="mute">Recherche…</div>`;
@@ -589,13 +647,13 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => switchTab
 async function load(force){
   if(!settings.lieu){ renderAll(); return; }
   const cache = store.get("cache", null);
-  const sameLieu = cache && cache.lat===settings.lieu.lat && cache.lon===settings.lieu.lon;
+  const sameLieu = cache && cache.v===2 && cache.lat===settings.lieu.lat && cache.lon===settings.lieu.lon;
   if(sameLieu && !wx){ wx = process(cache.raw); wx.fetched = cache.at; }
   renderAll();
   if(!force && sameLieu && Date.now()-cache.at < 30*60e3) return;   // cache 30 min
   try{
     const raw = await fetchWeather();
-    store.set("cache", {lat:settings.lieu.lat, lon:settings.lieu.lon, at:Date.now(), raw});
+    store.set("cache", {v:2, lat:settings.lieu.lat, lon:settings.lieu.lon, at:Date.now(), raw});
     wx = process(raw); demo=false; renderAll();
   }catch(e){
     const el = document.getElementById("tab-prev");
